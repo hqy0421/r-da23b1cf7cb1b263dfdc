@@ -2,6 +2,7 @@ import threading
 import time
 import typing as tp
 from dataclasses import dataclass, field
+from queue import Empty
 
 import stopit
 
@@ -24,20 +25,31 @@ class StageParams(tp.NamedTuple):
     input_queue: IterableQueue
     output_queues: OutputQueues
     namespace: utils.Namespace
+    controller: tp.Optional[tp.Any] = None
 
     @classmethod
     def create(
-        cls, input_queue: IterableQueue, output_queues: OutputQueues, total_workers: int
+        cls,
+        input_queue: IterableQueue,
+        output_queues: OutputQueues,
+        total_workers: int,
+        controller: tp.Optional[tp.Any] = None,
     ) -> "StageParams":
         return cls(
             namespace=utils.Namespace(active_workers=total_workers),
             input_queue=input_queue,
             output_queues=output_queues,
+            controller=controller,
         )
 
-    def worker_done(self):
-        with self.namespace:
-            self.namespace.active_workers -= 1
+    def worker_done(self, worker: tp.Optional["Worker"] = None):
+        controller = self.controller
+
+        if controller is None:
+            with self.namespace:
+                self.namespace.active_workers -= 1
+        else:
+            controller._on_worker_done(self, worker)
 
 
 class WorkerInfo(tp.NamedTuple):
@@ -55,7 +67,13 @@ class Worker(tp.Generic[T]):
     on_done: tp.Optional[tp.Callable[..., Kwargs]]
     f_args: tp.List[str]
     namespace: utils.Namespace = field(
-        default_factory=lambda: utils.Namespace(done=False, task_start_time=None)
+        default_factory=lambda: utils.Namespace(
+            done=False,
+            task_start_time=None,
+            retiring=False,
+            finished=False,
+            processed=0,
+        )
     )
     process: tp.Optional[threading.Thread] = None
 
@@ -92,7 +110,7 @@ class Worker(tp.Generic[T]):
                 **{key: value for key, value in kwargs.items() if key in self.f_args},
             )
 
-            self.stage_params.worker_done()
+            self.stage_params.worker_done(self)
 
             if self.on_done is not None:
                 kwargs.setdefault(
@@ -115,6 +133,13 @@ class Worker(tp.Generic[T]):
         except pypeln_utils.StopThreadException:
             pass
         except BaseException as e:
+            # a processing or callback failure ends the work associated to
+            # this run: reject further adjustments and notify the pipeline
+            controller = self.stage_params.controller
+
+            if controller is not None:
+                controller.close()
+
             try:
                 self.main_queue.raise_exception(e)
                 time.sleep(0.001)
@@ -142,6 +167,14 @@ class Worker(tp.Generic[T]):
 
     def done(self):
         self.namespace.done = True
+
+    def retire(self):
+        """
+        Marks the worker as retiring: it stops pulling new elements and exits
+        normally once its current element (including an ongoing `flat_map`
+        expansion) has been fully delivered.
+        """
+        self.namespace.retiring = True
 
     def did_timeout(self):
         return (
@@ -172,9 +205,21 @@ class Applicable(pypeln_utils.Protocol):
 
 class ApplyProcess(ProcessFn, Applicable):
     def __call__(self, worker: Worker, **kwargs):
-        for elem in worker.stage_params.input_queue:
+        input_queue = worker.stage_params.input_queue
+
+        # mirrors IterableQueue.__iter__ but also stops pulling new elements
+        # once the worker is marked as retiring; an element that was already
+        # received is always fully processed and delivered before exiting
+        while not (worker.namespace.retiring or input_queue.is_done()):
+            try:
+                elem = input_queue.get(timeout=pypeln_utils.TIMEOUT)
+            except Empty:
+                continue
+
             with worker.measure_task_time():
                 self.apply(worker, elem, **kwargs)
+
+            worker.namespace.processed += 1
 
 
 class StageStatus:

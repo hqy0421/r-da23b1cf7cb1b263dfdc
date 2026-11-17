@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**New features:**
+
+- `pypeln.thread`: runtime worker adjustment for `map`, `filter`, `flat_map` (and `each`) stages. Every adjustable stage now exposes a `stage.controller` (`pl.thread.WorkerController`) handle whose `set_workers(n)` method scales the stage's workers while the pipeline is running, without re-reading the source or restarting the chain. New workers build their own resources (`on_start` runs on their own thread); workers selected for removal stop pulling new elements, deliver their current element (including ongoing `flat_map` expansions), run `on_done`, and exit normally. `Element` indices and per-worker processing counts are preserved, adjustments racing with the end of the source never cause premature EOF, tail loss, or waits for non-existent producers, and adjustments are rejected once the controller is closed (explicitly via `close()`, or when the pipeline ends or fails).
+
 ## [0.4.7](https://github.com/cgarciae/pypeln/tree/0.4.7) (2021-01-05)
 
 [Full Changelog](https://github.com/cgarciae/pypeln/compare/0.4.6...0.4.7)

@@ -1,10 +1,11 @@
 import typing as tp
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from pypeln import utils as pypeln_utils
 from pypeln.utils import Kwargs, T
 
 from . import utils
+from .controller import WorkerController
 from .queue import IterableQueue, OutputQueues
 from .supervisor import Supervisor
 from .worker import ProcessFn, StageParams, Worker
@@ -21,6 +22,10 @@ class Stage(pypeln_utils.BaseStage[T], tp.Iterable[T]):
     on_start: tp.Optional[tp.Callable[..., Kwargs]]
     on_done: tp.Optional[tp.Callable[..., Kwargs]]
     f_args: tp.List[str]
+    adjustable: bool = True
+    controller: tp.Optional[WorkerController] = field(
+        default_factory=WorkerController, compare=False, repr=False
+    )
 
     def __hash__(self):
         return id(self)
@@ -45,12 +50,13 @@ class Stage(pypeln_utils.BaseStage[T], tp.Iterable[T]):
             input_queue=input_queue,
             output_queues=built[self],
             total_workers=self.workers,
+            controller=self.controller,
         )
 
-        for i in range(self.workers):
-            worker = Worker(
+        def make_worker(index: int) -> Worker:
+            return Worker(
                 process_fn=self.process_fn,
-                index=i,
+                index=index,
                 timeout=self.timeout,
                 stage_params=stage_params,
                 main_queue=main_queue,
@@ -59,6 +65,17 @@ class Stage(pypeln_utils.BaseStage[T], tp.Iterable[T]):
                 f_args=self.f_args,
             )
 
+        workers = [make_worker(index=i) for i in range(self.workers)]
+
+        if self.controller is not None:
+            self.controller._bind(
+                stage_params=stage_params,
+                workers=workers,
+                make_worker=make_worker,
+                adjustable=self.adjustable,
+            )
+
+        for worker in workers:
             yield worker
 
         for dependency in self.dependencies:

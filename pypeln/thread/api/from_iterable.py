@@ -69,4 +69,5 @@ def from_iterable(
         on_start=None,
         on_done=None,
         f_args=[],
+        adjustable=False,
     )

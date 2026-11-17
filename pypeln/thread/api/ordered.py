@@ -85,4 +85,5 @@ def ordered(
         on_start=None,
         on_done=None,
         f_args=[],
+        adjustable=False,
     )

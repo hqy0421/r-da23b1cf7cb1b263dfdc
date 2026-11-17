@@ -18,14 +18,11 @@ class Supervisor:
 
     def __call__(self):
         try:
-            workers = [worker for worker in self.workers if worker.timeout > 0]
-
-            if not workers:
-                return
-
+            # the worker list is re-read on every pass so that workers added
+            # at runtime (through a WorkerController) are also supervised
             while not self.done:
-                for worker in workers:
-                    if worker.did_timeout():
+                for worker in list(self.workers):
+                    if worker.timeout > 0 and worker.did_timeout():
                         worker.stop()
                         worker.start()
 
@@ -40,15 +37,40 @@ class Supervisor:
     def __exit__(self, *args):
         self.done = True
 
-        for worker in self.workers:
+        # end the work associated to this run: reject further adjustments
+        for controller in self._controllers():
+            controller.close()
+
+        for worker in list(self.workers):
             worker.stop()
 
-        while any(worker.process.is_alive() for worker in self.workers):
+        while any(
+            worker.process is not None and worker.process.is_alive()
+            for worker in list(self.workers)
+        ):
             time.sleep(pypeln_utils.TIMEOUT)
 
+    def _controllers(self) -> tp.List[tp.Any]:
+        controllers = []
+        seen = set()
+
+        for worker in list(self.workers):
+            controller = getattr(worker.stage_params, "controller", None)
+
+            if controller is not None and id(controller) not in seen:
+                seen.add(id(controller))
+                controllers.append(controller)
+
+        return controllers
+
     def start(self):
-        for worker in self.workers:
+        for worker in list(self.workers):
             worker.start()
+
+        # activate the controllers once the pipeline is actually running so
+        # runtime adjustments can be applied
+        for controller in self._controllers():
+            controller._activate(self)
 
         t = threading.Thread(target=self)
         t.daemon = True
